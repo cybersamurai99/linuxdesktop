@@ -1,0 +1,40 @@
+#!/bin/bash
+
+echo "🚀 Starting Fedora 43 Gaming Setup for RTX 4090..."
+
+# 1. Update DNF5 Configuration for speed
+echo "⚡ Optimizing DNF5..."
+sudo sed -i 's/\[main\]/\[main\]\nmax_parallel_downloads=10/' /etc/dnf/dnf.conf
+
+# 2. Update System
+echo "🔄 Updating system..."
+sudo dnf upgrade --refresh -y
+
+# 3. Enable RPM Fusion Repos
+echo "📦 Enabling RPM Fusion..."
+sudo dnf install -y https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
+https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
+
+# 4. Install NVIDIA Drivers & CUDA
+echo "🎮 Installing NVIDIA Drivers for RTX 4090..."
+sudo dnf install -y akmod-nvidia xorg-x11-drv-nvidia-cuda kernel-devel
+
+# 5. Install Multimedia Codecs
+echo "🎥 Installing Multimedia Codecs..."
+sudo dnf groupupdate multimedia --setop="install_weak_deps=False" --exclude=PackageKit-gstreamer-plugin -y
+sudo dnf groupupdate sound-and-video -y
+
+# 6. Install Gaming Tools
+echo "🕹️ Installing Steam, MangoHud, and GameMode..."
+sudo dnf install -y steam mangohud gamemode
+
+# 7. Enable Flathub for extra apps (Discord, Heroic, etc.)
+echo "🌍 Enabling Flathub..."
+flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+# 8. Optimization for High-VRAM GPUs (RTX 4090)
+echo "🧠 Tweaking system for 4090 performance..."
+echo "vm.max_map_count=2147483642" | sudo tee /etc/sysctl.d/90-gaming.conf
+sudo sysctl -p /etc/sysctl.d/90-gaming.conf
+
+echo "✅ Setup complete! Please REBOOT your system to load the NVIDIA drivers."
