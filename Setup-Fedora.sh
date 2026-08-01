@@ -1,5 +1,16 @@
 #!/bin/bash
 
+pause() {
+    echo
+    read -n 1 -s -r -p "Press any key to continue..."
+    echo
+}
+
+echo "🚀 Starting Fedora 43 Gaming Setup for RTX 4090..."
+echo "This is a multi-stage setup script. It will reboot your system multiple times to ensure proper driver installation and configuration."
+
+pause
+
 # Path to the state file to track progress across reboots
 STATE_FILE="$HOME/.fedora_setup_stage"
 [ ! -f "$STATE_FILE" ] && echo "1" > "$STATE_FILE"
@@ -15,7 +26,12 @@ error_exit() {
 case $STAGE in
     1)
         echo "--- STAGE 1: Repository Setup and System Update ---"
-        # Taken from https://github.com/wz790/Fedora-Noble-Setup
+        
+        # enable passwordless sudo
+        echo "$USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/$USER >/dev/null && sudo chmod 0440 /etc/sudoers.d/$USER
+
+        echo "⚡ Optimizing DNF5..."
+        sudo sed -i 's/\[main\]/\[main\]\nmax_parallel_downloads=10/' /etc/dnf/dnf.conf
         
         # Install RPM Fusion (Free and Nonfree)
         sudo dnf5 install -y \
@@ -67,6 +83,11 @@ case $STAGE in
             sleep 10
             echo "Still building..."
         done
+
+        # Optimization for High-VRAM GPUs (RTX 4090)
+        echo "🧠 Tweaking system for 4090 performance..."
+        echo "vm.max_map_count=2147483642" | sudo tee /etc/sysctl.d/90-gaming.conf
+        sudo sysctl -p /etc/sysctl.d/90-gaming.conf
 
         echo "4" > "$STATE_FILE"
         echo "Nvidia drivers installed and built. Rebooting to activate drivers..."
@@ -123,9 +144,36 @@ EOF
         # Speed optimization: Disable wait-online
         sudo systemctl disable NetworkManager-wait-online.service
 
-        # Final Apps
+        # Steam and VLC installation
         sudo dnf5 install -y steam vlc
         flatpak install -y flathub com.github.tchx84.Flatseal
+
+        # Enable Fn key mode for Nuphy keyboards
+        echo "options hid_apple fnmode=2" | sudo tee /etc/modprobe.d/hid_apple.conf
+        echo 2 | sudo tee /sys/module/hid_apple/parameters/fnmode
+
+        # Enable git credential manager for HTTPS repos
+        sudo dnf install -y git git-credential-libsecret
+        sudo dnf copr enable -y matthickford/git-credential-manager
+        sudo dnf install -y git-credential-manager
+        git config --global credential.helper "/usr/bin/git-credential-manager"
+        git config --global credential.credentialStore libsecret
+
+        # Install VScode
+        sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc
+        sudo sh -c 'echo -e "[code]\nname=Visual Studio Code\nbaseurl=https://packages.microsoft.com/yumrepos/vscode\nenabled=1\ngpgcheck=1\ngpgkey=https://packages.microsoft.com/keys/microsoft.asc" > /etc/yum.repos.d/vscode.repo'
+        sudo dnf check-update
+        sudo dnf install -y code
+
+        # Install docker and docker-compose
+        curl -fsSL https://get.docker.com | sudo sh
+        sudo usermod -aG docker $USER
+
+        # Install easyeffects
+        sudo dnf install -y easyeffects
+
+        # install opencode (disabled as optional)
+        # curl -fsSL https://opencode.ai/install | bash
 
         # Final Cleanup
         sudo dnf5 autoremove -y
@@ -137,4 +185,5 @@ EOF
         echo "SETUP COMPLETE! Your Fedora 43 system is ready."
         echo "----------------------------------------------------"
         ;;
+
 esac
