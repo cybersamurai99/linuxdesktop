@@ -27,6 +27,17 @@ MAGENTA='\033[35m'
 CYAN='\033[36m'
 WHITE='\033[97m'
 
+cleanup() {
+    local exit_code=$?
+    if [[ $exit_code -ne 0 && -f "$STATE_FILE" ]]; then
+        warn "\n${ICON_WARNING} Script interrupted or failed. State saved at Stage $(cat "$STATE_FILE")."
+        warn "You can resume by running the script again."
+    fi
+    exit $exit_code
+}
+
+trap cleanup EXIT SIGINT SIGTERM
+
 info(){ echo -e "${CYAN}${1}${NC}"; }
 success(){ echo -e "${GREEN}${1}${NC}"; }
 warn(){ echo -e "${YELLOW}${1}${NC}"; }
@@ -97,10 +108,15 @@ set_stage_and_reboot() {
 stage_one() {
     info "${ICON_REFRESH} --- STAGE 1: Repository Setup and System Update ---"
 
-    echo "$USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/$USER >/dev/null && sudo chmod 0440 /etc/sudoers.d/$USER
+    if [ ! -f /etc/sudoers.d/$USER ]; then
+        info "Configuring passwordless sudo..."
+        echo "$USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/$USER >/dev/null && sudo chmod 0440 /etc/sudoers.d/$USER
+    fi
 
     info "${ICON_LIGHTNING} Optimizing DNF5..."
-    sudo sed -i 's/\[main\]/\[main\]\nmax_parallel_downloads=10/' /etc/dnf/dnf.conf
+    if ! grep -q "max_parallel_downloads" /etc/dnf/dnf.conf; then
+        sudo sed -i 's/\[main\]/\[main\]\nmax_parallel_downloads=10/' /etc/dnf/dnf.conf
+    fi
 
     sudo dnf5 install -y \
         https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
@@ -131,21 +147,34 @@ stage_three() {
     sudo dnf5 install -y kernel-devel kernel-headers gcc make dkms acpid \
         libglvnd-glx libglvnd-opengl libglvnd-devel pkgconfig
 
-    sudo sh -c 'echo "%_with_kmod_nvidia_open 1" > /etc/rpm/macros.nvidia-kmod'
+    if [ ! -f /etc/rpm/macros.nvidia-kmod ]; then
+        sudo sh -c 'echo "%_with_kmod_nvidia_open 1" > /etc/rpm/macros.nvidia-kmod'
+    fi
 
     sudo dnf5 install -y akmod-nvidia xorg-x11-drv-nvidia-cuda
 
     info "Waiting for Akmods to build the Nvidia kernel module..."
     warn "This can take 5-10 minutes. Do not cancel."
 
-    while [[ $(ps aux | grep -i "[a]kmods" | wc -l) -gt 0 ]]; do
+    # More robust waiting for akmod-nvidia
+    for i in {1..60}; do
+        if modinfo nvidia >/dev/null 2>&1; then
+            success "${ICON_CHECK} Nvidia module built successfully."
+            break
+        fi
+        info "Still building ($i/60)..."
         sleep 10
-        info "Still building..."
     done
 
+    if ! modinfo nvidia >/dev/null 2>&1; then
+        err "${ICON_ERROR} Nvidia module build timed out or failed. Please check 'journalctl -u akmods'."
+    fi
+
     info "${ICON_BRAIN} Tweaking system for 4090 performance..."
-    echo "vm.max_map_count=2147483642" | sudo tee /etc/sysctl.d/90-gaming.conf
-    sudo sysctl -p /etc/sysctl.d/90-gaming.conf
+    if [ ! -f /etc/sysctl.d/90-gaming.conf ] || ! grep -q "vm.max_map_count=2147483642" /etc/sysctl.d/90-gaming.conf; then
+        echo "vm.max_map_count=2147483642" | sudo tee /etc/sysctl.d/90-gaming.conf
+        sudo sysctl -p /etc/sysctl.d/90-gaming.conf
+    fi
 
     set_stage_and_reboot 4 "Nvidia drivers installed and built. Rebooting to activate drivers..."
 }
@@ -153,24 +182,29 @@ stage_three() {
 stage_four() {
     info "${ICON_VIDEO} --- STAGE 4: Multimedia, Apps, and Optimization ---"
 
+    info "Configuring multimedia codecs..."
     sudo dnf5 swap -y ffmpeg-free ffmpeg --allowerasing
-
     sudo dnf5 install -y gstreamer1-plugins-{bad-\*,good-\*,base} \
         gstreamer1-plugin-openh264 gstreamer1-libav lame\* \
+        libavcodec-freeworld \
         --exclude=gstreamer1-plugins-bad-free-devel
     sudo dnf5 group install -y multimedia sound-and-video
-
     sudo dnf5 install -y ffmpeg-libs libva libva-utils libva-nvidia-driver
-    sudo dnf5 config-manager --set-enabled fedora-cisco-openh264
+    sudo dnf5 config-manager set-enabled fedora-cisco-openh264
     sudo dnf5 update -y
 
+    info "Installing fonts..."
     sudo dnf5 install -y curl cabextract xorg-x11-font-utils fontconfig
-    sudo rpm -i --nodigest --nosignature https://downloads.sourceforge.net/project/mscorefonts2/rpms/msttcore-fonts-installer-2.6-1.noarch.rpm
-    sudo fc-cache -fv
+    if ! fc-list | grep -qi "times new roman"; then
+        sudo rpm -i --nodigest --nosignature https://downloads.sourceforge.net/project/mscorefonts2/rpms/msttcore-fonts-installer-2.6-1.noarch.rpm || true
+        sudo fc-cache -fv
+    fi
 
-    sudo dnf5 install -y fuse fuse-libs
-    flatpak install -y flathub it.mijorus.gearlever
+    info "Installing utility apps..."
+    sudo dnf5 install -y fuse fuse-libs steam vlc easyeffects
+    flatpak install -y flathub it.mijorus.gearlever com.github.tchx84.Flatseal
 
+    info "Setting up Flatpak auto-updates..."
     sudo tee /etc/systemd/system/flatpak-update.service > /dev/null <<'EOF'
 [Unit]
 Description=Update Flatpak apps automatically
@@ -193,27 +227,34 @@ EOF
     sudo systemctl enable --now flatpak-update.timer
     sudo systemctl disable NetworkManager-wait-online.service
 
-    sudo dnf5 install -y steam vlc
-    flatpak install -y flathub com.github.tchx84.Flatseal
-
+    info "Configuring hardware tweaks..."
     echo "options hid_apple fnmode=2" | sudo tee /etc/modprobe.d/hid_apple.conf
     echo 2 | sudo tee /sys/module/hid_apple/parameters/fnmode
 
-    sudo dnf install -y git git-credential-libsecret
-    sudo dnf copr enable -y matthickford/git-credential-manager
-    sudo dnf install -y git-credential-manager
+    info "Installing Development Tools..."
+    # Git & GCM
+    sudo dnf5 install -y git git-credential-libsecret
+    if ! dnf5 copr list | grep -q "matthickford/git-credential-manager"; then
+        sudo dnf5 copr enable -y matthickford/git-credential-manager
+    fi
+    sudo dnf5 install -y git-credential-manager
     git config --global credential.helper "/usr/bin/git-credential-manager"
     git config --global credential.credentialStore libsecret
 
-    sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc
-    sudo sh -c 'echo -e "[code]\nname=Visual Studio Code\nbaseurl=https://packages.microsoft.com/yumrepos/vscode\nenabled=1\ngpgcheck=1\ngpgkey=https://packages.microsoft.com/keys/microsoft.asc" > /etc/yum.repos.d/vscode.repo'
-    sudo dnf check-update
-    sudo dnf install -y code
+    # VS Code
+    if [ ! -f /etc/yum.repos.d/vscode.repo ]; then
+        sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc
+        sudo sh -c 'echo -e "[code]\nname=Visual Studio Code\nbaseurl=https://packages.microsoft.com/yumrepos/vscode\nenabled=1\ngpgcheck=1\ngpgkey=https://packages.microsoft.com/keys/microsoft.asc" > /etc/yum.repos.d/vscode.repo'
+    fi
+    sudo dnf5 install -y code
 
-    curl -fsSL https://get.docker.com | sudo sh
+    # Docker (Repo based)
+    if ! dnf5 repolist | grep -q "docker-ce"; then
+        sudo dnf5 config-manager add-repo https://download.docker.com/linux/fedora/docker-ce.repo
+    fi
+    sudo dnf5 install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    sudo systemctl enable --now docker
     sudo usermod -aG docker $USER
-
-    sudo dnf install -y easyeffects
 
     sudo dnf5 autoremove -y
     sudo dnf5 clean all
