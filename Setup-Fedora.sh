@@ -230,6 +230,8 @@ EOF
     info "Configuring hardware tweaks..."
     echo "options hid_apple fnmode=2" | sudo tee /etc/modprobe.d/hid_apple.conf
     echo 2 | sudo tee /sys/module/hid_apple/parameters/fnmode
+    echo "Running dracut to rebuild initramfs...this will take a few seconds."
+    sudo dracut --force && echo "Initramfs rebuilt successfully."
 
     info "Installing Development Tools..."
     # Git & GCM
